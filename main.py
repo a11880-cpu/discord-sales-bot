@@ -7,7 +7,11 @@ from database import (
     obter_saldo_cashback, solicitar_uso_cashback, aprovar_uso_cashback,
     negar_uso_cashback, obter_uso_cashback
 )
+from image_analyzer import (
+    init_image_hash_table, calculate_image_hash, store_image_hash, is_image_duplicate
+)
 import aiohttp
+import asyncio
 
 # Inicializar bot
 intents = discord.Intents.default()
@@ -18,6 +22,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Inicializar banco de dados
 init_database()
+init_image_hash_table()
 
 @bot.event
 async def on_ready():
@@ -86,6 +91,43 @@ class VendaModal(discord.ui.Modal, title="Registrar Nova Venda"):
                 attachment = msg_comprovativo.attachments[0]
                 comprovativo_url = attachment.url
                 
+                # Verificar se é uma imagem
+                if not attachment.content_type or not attachment.content_type.startswith('image/'):
+                    await interaction.followup.send(
+                        "❌ O arquivo enviado não é uma imagem! Tente novamente com /vendas",
+                        ephemeral=True
+                    )
+                    await msg_comprovativo.delete()
+                    return
+                
+                # Enviar mensagem de análise
+                await interaction.followup.send(
+                    "🔍 Analisando imagem para detectar duplicatas...",
+                    ephemeral=True
+                )
+                
+                # Calcular hash da imagem
+                image_hash = await calculate_image_hash(comprovativo_url)
+                
+                if not image_hash:
+                    await interaction.followup.send(
+                        "❌ Erro ao processar a imagem. Tente novamente com /vendas",
+                        ephemeral=True
+                    )
+                    await msg_comprovativo.delete()
+                    return
+                
+                # Verificar se é duplicada
+                is_duplicate, venda_id_original = is_image_duplicate(image_hash)
+                
+                if is_duplicate:
+                    await interaction.followup.send(
+                        f"❌ **Imagem Duplicada!**\n\nEsta imagem é muito similar à venda ID **{venda_id_original}**. \nNão são permitidas imagens iguais ou muito similares.\n\nTente novamente com uma imagem diferente usando /vendas",
+                        ephemeral=True
+                    )
+                    await msg_comprovativo.delete()
+                    return
+                
                 # Registrar venda no banco de dados
                 venda_id = registrar_venda(
                     interaction.user.id,
@@ -96,6 +138,9 @@ class VendaModal(discord.ui.Modal, title="Registrar Nova Venda"):
                     self.produtos.value,
                     comprovativo_url
                 )
+                
+                # Armazenar hash da imagem
+                store_image_hash(venda_id, image_hash)
                 
                 # Obter canal de vendas
                 canal_vendas = bot.get_channel(config.VENDAS_CHANNEL_ID)
@@ -111,10 +156,11 @@ class VendaModal(discord.ui.Modal, title="Registrar Nova Venda"):
                 
                 embed.add_field(name="👤 Vendedor", value=f"{interaction.user.mention}", inline=False)
                 embed.add_field(name="🎮 Nome do Player", value=self.nome_player.value, inline=True)
-                embed.add_field(name="🆔 ID do Player", value=self.id_player.value, inline=True)
+                embed.add_field(name="🔑 ID do Player", value=self.id_player.value, inline=True)
                 embed.add_field(name="💰 Preço da Venda", value=f"R$ {valor_float:.2f}", inline=False)
                 embed.add_field(name="📦 Produtos", value=self.produtos.value, inline=False)
                 embed.add_field(name="📸 Comprovativo", value=f"[Ver comprovativo]({comprovativo_url})", inline=False)
+                embed.add_field(name="✅ Status", value="Pendente de Análise", inline=False)
                 embed.set_footer(text=f"Venda ID: {venda_id}")
                 embed.set_image(url=comprovativo_url)
                 
@@ -133,7 +179,7 @@ class VendaModal(discord.ui.Modal, title="Registrar Nova Venda"):
                 
                 # Confirmar ao usuário
                 await interaction.followup.send(
-                    f"✅ Venda registrada com sucesso!\n**ID da venda:** {venda_id}\n**Valor:** R$ {valor_float:.2f}",
+                    f"✅ Venda registrada com sucesso!\n**ID da venda:** {venda_id}\n**Valor:** R$ {valor_float:.2f}\n\n📸 Imagem validada e armazenada!",
                     ephemeral=True
                 )
                 
@@ -234,8 +280,6 @@ async def saldo_cashback(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Erro ao verificar saldo: {str(e)}", ephemeral=True)
 
 # ==================== SYSTEM DE REAÇÕES ====================
-
-import asyncio
 
 @bot.event
 async def on_reaction_add(reaction, user):
