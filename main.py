@@ -7,6 +7,7 @@ from database import (
     obter_saldo_cashback, solicitar_uso_cashback, aprovar_uso_cashback,
     negar_uso_cashback, obter_uso_cashback
 )
+import aiohttp
 
 # Inicializar bot
 intents = discord.Intents.default()
@@ -23,66 +24,134 @@ async def on_ready():
     await bot.tree.sync()
     print(f'{bot.user} está online!')
 
-# ==================== COMANDOS DE VENDAS ====================
+# ==================== MODAL DE VENDAS ====================
 
-@bot.tree.command(name="vendas", description="Registrar uma nova venda")
-@app_commands.describe(
-    valor="Valor da venda",
-    descricao="Descrição da venda"
-)
-async def vendas(interaction: discord.Interaction, valor: float, descricao: str):
-    """Registra uma venda e envia para o canal de aprovação"""
+class VendaModal(discord.ui.Modal, title="Registrar Nova Venda"):
+    nome_player = discord.ui.TextInput(
+        label="Nome do Player",
+        placeholder="Digite o nome do player...",
+        required=True,
+        max_length=100
+    )
     
-    try:
-        # Validar valor
-        if valor <= 0:
-            await interaction.response.send_message("❌ O valor deve ser maior que 0!", ephemeral=True)
-            return
-        
-        # Obter canal de vendas
-        canal_vendas = bot.get_channel(config.VENDAS_CHANNEL_ID)
-        if not canal_vendas:
-            await interaction.response.send_message("❌ Canal de vendas não configurado!", ephemeral=True)
-            return
-        
-        # Registrar venda (provisoriamente)
-        venda_id = registrar_venda(
-            interaction.user.id,
-            interaction.user.name,
-            valor,
-            descricao,
-            0
-        )
-        
-        # Criar embed para o canal
-        embed = discord.Embed(
-            title=f"📊 Nova Venda Registrada - ID: {venda_id}",
-            description=f"**Vendedor:** {interaction.user.mention}\n**Valor:** R$ {valor:.2f}\n**Descrição:** {descricao}",
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text=f"Venda ID: {venda_id}")
-        
-        # Enviar mensagem com reações
-        mensagem = await canal_vendas.send(embed=embed)
-        await mensagem.add_reaction('✅')
-        await mensagem.add_reaction('❌')
-        
-        # Atualizar ID da mensagem no banco
-        import sqlite3
-        conn = sqlite3.connect('sales_bot.db')
-        cursor = conn.cursor()
-        cursor.execute('UPDATE vendas SET mensagem_id = ? WHERE id = ?', (mensagem.id, venda_id))
-        conn.commit()
-        conn.close()
-        
-        # Responder ao usuário
-        await interaction.response.send_message(
-            f"✅ Venda registrada com sucesso!\n**ID da venda:** {venda_id}\n**Valor:** R$ {valor:.2f}",
-            ephemeral=True
-        )
+    id_player = discord.ui.TextInput(
+        label="ID do Player",
+        placeholder="Digite o ID do player...",
+        required=True,
+        max_length=100
+    )
     
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Erro ao registrar venda: {str(e)}", ephemeral=True)
+    valor = discord.ui.TextInput(
+        label="Preço da Venda (R$)",
+        placeholder="Ex: 150.00",
+        required=True,
+        max_length=20
+    )
+    
+    produtos = discord.ui.TextInput(
+        label="Produtos",
+        placeholder="Descreva os produtos vendidos...",
+        required=True,
+        max_length=500,
+        style=discord.TextStyle.paragraph
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Processa o envio do modal"""
+        try:
+            # Validar valor
+            try:
+                valor_float = float(self.valor.value)
+                if valor_float <= 0:
+                    await interaction.response.send_message("❌ O valor deve ser maior que 0!", ephemeral=True)
+                    return
+            except ValueError:
+                await interaction.response.send_message("❌ O valor deve ser um número válido!", ephemeral=True)
+                return
+            
+            # Enviar mensagem informando sobre o comprovativo
+            await interaction.response.send_message(
+                "✅ Formulário recebido! Agora envie uma foto do comprovativo neste canal para completar o registro.",
+                ephemeral=True
+            )
+            
+            # Aguardar o envio da foto
+            def check(msg):
+                return msg.author == interaction.user and len(msg.attachments) > 0 and msg.channel == interaction.channel
+            
+            try:
+                msg_comprovativo = await bot.wait_for('message', check=check, timeout=300)  # 5 minutos
+                
+                # Obter a primeira anexação (foto)
+                attachment = msg_comprovativo.attachments[0]
+                comprovativo_url = attachment.url
+                
+                # Registrar venda no banco de dados
+                venda_id = registrar_venda(
+                    interaction.user.id,
+                    interaction.user.name,
+                    self.nome_player.value,
+                    self.id_player.value,
+                    valor_float,
+                    self.produtos.value,
+                    comprovativo_url
+                )
+                
+                # Obter canal de vendas
+                canal_vendas = bot.get_channel(config.VENDAS_CHANNEL_ID)
+                if not canal_vendas:
+                    await interaction.followup.send("❌ Canal de vendas não configurado!", ephemeral=True)
+                    return
+                
+                # Criar embed com os dados da venda
+                embed = discord.Embed(
+                    title=f"📊 Nova Venda Registrada - ID: {venda_id}",
+                    color=discord.Color.blue()
+                )
+                
+                embed.add_field(name="👤 Vendedor", value=f"{interaction.user.mention}", inline=False)
+                embed.add_field(name="🎮 Nome do Player", value=self.nome_player.value, inline=True)
+                embed.add_field(name="🆔 ID do Player", value=self.id_player.value, inline=True)
+                embed.add_field(name="💰 Preço da Venda", value=f"R$ {valor_float:.2f}", inline=False)
+                embed.add_field(name="📦 Produtos", value=self.produtos.value, inline=False)
+                embed.add_field(name="📸 Comprovativo", value=f"[Ver comprovativo]({comprovativo_url})", inline=False)
+                embed.set_footer(text=f"Venda ID: {venda_id}")
+                embed.set_image(url=comprovativo_url)
+                
+                # Enviar mensagem com reações
+                mensagem = await canal_vendas.send(embed=embed)
+                await mensagem.add_reaction('✅')
+                await mensagem.add_reaction('❌')
+                
+                # Atualizar ID da mensagem no banco
+                import sqlite3
+                conn = sqlite3.connect('sales_bot.db')
+                cursor = conn.cursor()
+                cursor.execute('UPDATE vendas SET mensagem_id = ? WHERE id = ?', (mensagem.id, venda_id))
+                conn.commit()
+                conn.close()
+                
+                # Confirmar ao usuário
+                await interaction.followup.send(
+                    f"✅ Venda registrada com sucesso!\n**ID da venda:** {venda_id}\n**Valor:** R$ {valor_float:.2f}",
+                    ephemeral=True
+                )
+                
+                # Deletar mensagem do comprovativo
+                await msg_comprovativo.delete()
+                
+            except asyncio.TimeoutError:
+                await interaction.followup.send("❌ Tempo limite excedido! Tente novamente com /vendas", ephemeral=True)
+        
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro ao processar formulário: {str(e)}", ephemeral=True)
+
+# ==================== COMANDO DE VENDAS ====================
+
+@bot.tree.command(name="vendas", description="Registrar uma nova venda com formulário")
+async def vendas(interaction: discord.Interaction):
+    """Abre um formulário para registrar uma nova venda"""
+    await interaction.response.send_modal(VendaModal())
 
 # ==================== COMANDOS DE CASHBACK ====================
 
@@ -166,6 +235,8 @@ async def saldo_cashback(interaction: discord.Interaction):
 
 # ==================== SYSTEM DE REAÇÕES ====================
 
+import asyncio
+
 @bot.event
 async def on_reaction_add(reaction, user):
     """Processa reações para aprovação de vendas e cashback"""
@@ -197,14 +268,14 @@ async def processar_aprovacao(reaction, user):
             venda_id = int(mensagem.embeds[0].footer.text.split(": ")[1])
             
             venda = obter_venda(venda_id)
-            if venda and venda[5] == 'pendente':  # Status pendente
+            if venda and venda[8] == 'pendente':  # Status pendente (índice 8)
                 # Calcular cashback
                 user_obj = await reaction.message.guild.fetch_member(venda[1])
                 role_name = config.get_highest_role(user_obj.roles)
                 
                 if role_name:
                     cashback_percentage = config.get_cashback_percentage(role_name)
-                    cashback_value = venda[3] * (cashback_percentage / 100)
+                    cashback_value = venda[5] * (cashback_percentage / 100)  # valor está no índice 5
                     
                     # Aprovar venda e criar cashback
                     aprovar_venda(venda_id, cashback_value)
@@ -213,7 +284,7 @@ async def processar_aprovacao(reaction, user):
                     embed = mensagem.embeds[0]
                     embed.color = discord.Color.green()
                     embed.title = f"✅ Venda Aprovada - ID: {venda_id}"
-                    embed.description += f"\n\n**Cashback Gerado:** R$ {cashback_value:.2f} ({cashback_percentage}%)"
+                    embed.add_field(name="✅ Status", value=f"Cashback Gerado: R$ {cashback_value:.2f} ({cashback_percentage}%)", inline=False)
                     embed.set_footer(text=f"Aprovada por: {user.name}")
                     
                     await mensagem.edit(embed=embed)
@@ -253,7 +324,7 @@ async def processar_negacao(reaction, user):
             venda_id = int(mensagem.embeds[0].footer.text.split(": ")[1])
             
             venda = obter_venda(venda_id)
-            if venda and venda[5] == 'pendente':
+            if venda and venda[8] == 'pendente':  # Status pendente (índice 8)
                 # Negar venda
                 negar_venda(venda_id)
                 

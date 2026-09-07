@@ -15,8 +15,11 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             user_name TEXT NOT NULL,
+            nome_player TEXT NOT NULL,
+            id_player TEXT NOT NULL,
             valor REAL NOT NULL,
-            descricao TEXT,
+            produtos TEXT NOT NULL,
+            comprovativo TEXT,
             status TEXT DEFAULT 'pendente',
             mensagem_id INTEGER,
             data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -52,15 +55,15 @@ def init_database():
     conn.commit()
     conn.close()
 
-def registrar_venda(user_id, user_name, valor, descricao, mensagem_id):
-    """Registra uma nova venda"""
+def registrar_venda(user_id, user_name, nome_player, id_player, valor, produtos, comprovativo):
+    """Registra uma nova venda com todos os detalhes"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     cursor.execute('''
-        INSERT INTO vendas (user_id, user_name, valor, descricao, mensagem_id)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, user_name, valor, descricao, mensagem_id))
+        INSERT INTO vendas (user_id, user_name, nome_player, id_player, valor, produtos, comprovativo)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, user_name, nome_player, id_player, valor, produtos, comprovativo))
     
     conn.commit()
     venda_id = cursor.lastrowid
